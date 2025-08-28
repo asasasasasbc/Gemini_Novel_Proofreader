@@ -1,0 +1,8 @@
+# config.yaml
+
+# 填入你的 Google Gemini API Key
+# 获取地址: https://aistudio.google.com/app/apikey
+API_KEY: ""
+
+# API代理，一般来说填空
+BASE_URL: ""
