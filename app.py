@@ -1,5 +1,5 @@
 # novel_proofreader.py
-
+# pip install gradio google-generativeai pyyaml
 import gradio as gr
 import google.generativeai as genai
 import yaml
