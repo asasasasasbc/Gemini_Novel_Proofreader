@@ -203,7 +203,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
                 value=initial_google_models[0] if initial_google_models else None
             )
             prompt_selector = gr.Radio(
-                choices=[("综合审查 (语句+错字)", "detailed_review"), ("仅查错别字", "simple_typo")],
+                choices=[("综合审查 (语句+错字)", "detailed_review"), ("仅查错别字", "simple_typo"), ("括号排查", "parenthesis")],
                 label="选择校对模式", value="detailed_review"
             )
             submit_btn = gr.Button("🚀 开始校对", variant="primary")
