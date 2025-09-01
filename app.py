@@ -151,7 +151,7 @@ def process_and_proofread_novel(novel_text, api_provider, model_name, prompt_mod
     full_report += "小说校对完毕\n\n"
     print("[INFO] 所有章节校对完成。")
     timestamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
-    output_filename = f"report_{timestamp}.txt"
+    output_filename = f"report_{prompt_mode}_{timestamp}.txt"
     with open(output_filename, "w", encoding="utf-8") as f: f.write(full_report)
     yield full_report, gr.File(value=output_filename, visible=True, label=f"下载报告 ({output_filename})")
 
