@@ -1,40 +1,38 @@
 # novel_proofreader.py
-# pip install gradio google-generativeai pyyaml
+# pip install -r requirements.txt
 import gradio as gr
 import google.generativeai as genai
+import openai
 import yaml
 import re
 import os
 import time
 from datetime import datetime
 
-# --- 1. 加载配置 ---
-def load_config():
-    """从 config.yaml 文件加载配置"""
-    print("[DEBUG] 正在尝试加载 config.yaml...")
+# --- 1. 配置加载 (分离) ---
+def load_config(config_file):
+    """从指定的 yaml 文件加载配置"""
+    print(f"[DEBUG] 正在尝试加载 {config_file}...")
     try:
-        with open("config.yaml", "r", encoding="utf-8") as file:
+        with open(config_file, "r", encoding="utf-8") as file:
             config = yaml.safe_load(file)
-            print("[DEBUG] config.yaml 加载成功。")
+            print(f"[DEBUG] {config_file} 加载成功。")
             return config
     except FileNotFoundError:
-        print("[ERROR] 错误：找不到 config.yaml 文件。")
-        raise FileNotFoundError(
-            "错误：找不到 config.yaml 文件。\n"
-            "请在脚本同目录下创建 config.yaml 文件，并填入您的 API_KEY。"
-        )
+        print(f"[ERROR] 错误：找不到 {config_file} 文件。")
+        raise FileNotFoundError(f"错误：找不到 {config_file} 文件。")
     except Exception as e:
-        print(f"[ERROR] 读取 config.yaml 时出错: {e}")
-        raise IOError(f"读取 config.yaml 时出错: {e}")
+        print(f"[ERROR] 读取 {config_file} 时出错: {e}")
+        raise IOError(f"读取 {config_file} 时出错: {e}")
 
-# --- 2. 调用 Gemini API 进行校对 (已集成重试功能) ---
+def load_models():
+    """从 models.yaml 加载模型列表"""
+    return load_config("models.yaml")
+
+# --- 2. API 调用层 (分离 Gemini 和 OpenAI) ---
 def proofread_chapter_with_gemini(chapter_title, chapter_content, model_name, api_key, prompt_template, proxy_url=None):
-    """
-    使用指定的 Gemini 模型和 prompt 模板对单个章节进行校对。
-    如果 API 调用失败，会自动重试最多2次。
-    """
+    """使用 Gemini API 进行校对，包含重试逻辑"""
     if proxy_url:
-        print(f"[DEBUG] 检测到代理配置，正在为本次 API 调用设置 https_proxy: {proxy_url}")
         os.environ['https_proxy'] = proxy_url
     else:
         if 'https_proxy' in os.environ: del os.environ['https_proxy']
@@ -43,205 +41,199 @@ def proofread_chapter_with_gemini(chapter_title, chapter_content, model_name, ap
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
     except Exception as e:
-        return f"无法配置或初始化 Gemini 模型: {e}\n请检查您的 API Key 是否正确。"
+        return f"无法配置或初始化 Gemini 模型: {e}"
 
     prompt = prompt_template.format(chapter_title=chapter_title, chapter_content=chapter_content)
-
-    # ==================== 新增的重试逻辑 ====================
-    max_retries = 2
-    retry_delay = 3 # 秒
+    max_retries, retry_delay = 2, 3
 
     try:
         for attempt in range(max_retries + 1):
             try:
-                print(f"[DEBUG] 正在为章节 '{chapter_title}' 调用 Gemini API (模型: {model_name}, 尝试: {attempt + 1}/{max_retries + 1})...")
+                print(f"[DEBUG] [Gemini] 正在为章节 '{chapter_title}' 调用 API (模型: {model_name}, 尝试: {attempt + 1})...")
                 response = model.generate_content(prompt)
-                print(f"[DEBUG] 已收到来自 API 的章节 '{chapter_title}' 的响应。")
-                return response.text # 成功，直接返回结果并退出函数
-
+                return response.text
             except Exception as e:
-                print(f"[ERROR] 尝试 {attempt + 1} 失败: {e}")
-                if attempt < max_retries:
-                    print(f"[INFO] {retry_delay} 秒后进行重试...")
-                    time.sleep(retry_delay)
-                else:
-                    # 所有重试均告失败
-                    print(f"[ERROR] 所有 {max_retries + 1} 次尝试均失败。")
-                    error_msg = f"在处理章节 '{chapter_title}' 时调用 API 出错 (已重试 {max_retries} 次)。\n最后错误: {e}\n请检查网络连接、API Key权限、代理设置或模型名称是否正确。"
-                    return error_msg
+                if attempt >= max_retries: raise e
+                print(f"[ERROR] [Gemini] 尝试 {attempt + 1} 失败: {e}. {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
     finally:
-        # 无论成功还是失败，最后都清理代理设置
-        if 'https_proxy' in os.environ:
-            del os.environ['https_proxy']
-            print("[DEBUG] 已清理本次 API 调用的 https_proxy 设置。")
-    # ========================================================
+        if 'https_proxy' in os.environ: del os.environ['https_proxy']
 
-# --- 3. 主处理函数 (移除进度条，增加 prompt 选择) ---
-def process_and_proofread_novel(novel_text, model_name, prompt_mode): # <--- 移除了 progress，增加了 prompt_mode
-    """
-    分割小说文本，逐章校对，并以流式方式返回结果。
-    """
-    print("\n--- 开始新的校对任务 ---")
+
+def proofread_chapter_with_openai(chapter_title, chapter_content, model_name, api_key, prompt_template, base_url=None):
+    """使用 OpenAI API 进行校对，包含重试逻辑"""
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url=base_url if base_url else None)
+    except Exception as e:
+        return f"无法配置或初始化 OpenAI 客户端: {e}"
+
+    prompt = prompt_template.format(chapter_title=chapter_title, chapter_content=chapter_content)
+    max_retries, retry_delay = 2, 3
+
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"[DEBUG] [OpenAI] 正在为章节 '{chapter_title}' 调用 API (模型: {model_name}, 尝试: {attempt + 1})...")
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if attempt >= max_retries: raise e
+            print(f"[ERROR] [OpenAI] 尝试 {attempt + 1} 失败: {e}. {retry_delay} 秒后重试...")
+            time.sleep(retry_delay)
+
+
+# --- 3. 主处理函数 (核心调度逻辑) ---
+def process_and_proofread_novel(novel_text, api_provider, model_name, prompt_mode):
+    """分割文本，根据选择的 API 调度校对任务，并流式返回结果"""
+    print(f"\n--- 开始新的校对任务 (API: {api_provider}) ---")
     if not novel_text.strip():
-        print("[INFO] 输入文本为空。")
         yield "请输入小说内容。", gr.File(visible=False)
         return
 
-    # --- 加载 Prompt 模板 ---
-    prompt_filepath = f"prompts/{prompt_mode}.txt"
-    print(f"[DEBUG] 正在加载 prompt 模板: {prompt_filepath}")
     try:
-        with open(prompt_filepath, "r", encoding="utf-8") as f:
+        # 加载通用资源
+        with open(f"prompts/{prompt_mode}.txt", "r", encoding="utf-8") as f:
             prompt_template = f.read()
-        print("[DEBUG] Prompt 模板加载成功。")
-    except FileNotFoundError:
-        error_msg = f"错误：找不到 prompt 文件 '{prompt_filepath}'。请确保 prompts 文件夹及文件存在。"
-        print(f"[ERROR] {error_msg}")
-        yield error_msg, gr.File(visible=False)
-        return
+        
+        # 根据 API 提供商加载特定配置并选择调用函数
+        if api_provider == "Google Gemini":
+            config = load_config("config.yaml")
+            api_key = config.get("API_KEY")
+            proxy_url = config.get("BASE_URL")
+            proofread_func = proofread_chapter_with_gemini
+            api_args = {'api_key': api_key, 'proxy_url': proxy_url}
+        elif api_provider == "OpenAI":
+            config = load_config("config_gpt.yaml")
+            api_key = config.get("API_KEY")
+            base_url = config.get("BASE_URL")
+            proofread_func = proofread_chapter_with_openai
+            api_args = {'api_key': api_key, 'base_url': base_url}
+        else:
+            yield "错误：无效的 API 提供商。", gr.File(visible=False); return
 
-    try:
-        config = load_config()
-        api_key = config.get("API_KEY")
-        proxy_url = config.get("BASE_URL")
-        # 简单的代理URL格式化
-        if proxy_url and not proxy_url.startswith(('http://', 'https://')):
-            proxy_url = "http://" + proxy_url.split("://")[-1].replace("/v1", "")
-
-        if not api_key or "XXXXXX" in api_key or "YOUR_GEMINI_API_KEY" in api_key:
-            yield "错误: API_KEY 未在 config.yaml 中配置。", gr.File(visible=False)
+        if not api_key or "..." in api_key or "YOUR" in api_key:
+            yield f"错误: {api_provider} 的 API_KEY 未在配置文件中正确配置。", gr.File(visible=False)
             return
-    except (FileNotFoundError, IOError) as e:
-        yield str(e), gr.File(visible=False)
-        return
 
+    except Exception as e:
+        yield f"加载配置时出错: {e}", gr.File(visible=False); return
+
+    # --- 章节分割逻辑 ---
     chapters_raw = re.split(r'^(第.*?章)', novel_text, flags=re.MULTILINE)
-    
     chapter_list = []
-    preamble = chapters_raw[0].strip()
-    if preamble:
+    if preamble := chapters_raw[0].strip():
         chapter_list.append({"title": "【序章/前言】", "content": preamble})
-
-    remaining_chapters = chapters_raw[1:]
-    for i in range(0, len(remaining_chapters), 2):
-        if i + 1 < len(remaining_chapters):
-            title = remaining_chapters[i].strip()
-            content = remaining_chapters[i+1].strip()
-            if content:
-                chapter_list.append({"title": title, "content": content})
-    
+    for i in range(1, len(chapters_raw), 2):
+        if content := chapters_raw[i+1].strip():
+            chapter_list.append({"title": chapters_raw[i].strip(), "content": content})
     if not chapter_list and novel_text.strip():
         chapter_list.append({"title": "【全文】", "content": novel_text.strip()})
-
     if not chapter_list:
-        yield "未能解析出任何文本内容。", gr.File(visible=False)
-        return
+        yield "未能解析出任何文本内容。", gr.File(visible=False); return
 
-    print(f"[DEBUG] 分割完成，共找到 {len(chapter_list)} 个部分需要处理。")
-
+    # --- 流式处理 ---
     full_report = f"小说校对报告 ({prompt_mode} 模式)\n"
-    full_report += f"模型: {model_name}\n"
+    full_report += f"API: {api_provider} | 模型: {model_name}\n"
     full_report += "====================\n\n"
-    
     yield full_report, gr.File(visible=False)
 
     for i, chapter in enumerate(chapter_list):
         print(f"[INFO] 开始处理第 {i+1}/{len(chapter_list)} 部分: {chapter['title']}")
-        full_report += f"{i+1}/{len(chapter_list)}: {chapter['title']}\n"
-        yield full_report, gr.File(visible=False)
-        result = proofread_chapter_with_gemini(
-            chapter['title'], 
-            chapter['content'], 
-            model_name, 
-            api_key,
-            prompt_template, # <--- 传递 prompt 模板
-            proxy_url
-        )
+        status_prefix = f"校对中 ({i+1}/{len(chapter_list)}): {chapter['title']}\n\n"
         
+        yield full_report + status_prefix, gr.File(visible=False)
+        result = ""
+        try:
+            result = proofread_func(
+                chapter_title=chapter['title'], chapter_content=chapter['content'],
+                model_name=model_name, prompt_template=prompt_template, **api_args
+            )
+        except Exception as e:
+            result = f"在处理章节 '{chapter['title']}' 时 API 调用最终失败。\n错误: {e}"
+        full_report +=  f"{i+1}/{len(chapter_list)}: {chapter['title']}\n\n"
         full_report += result + "\n\n--------------------\n\n"
-        
-        print(f"[STREAM] 正在更新界面，显示章节 '{chapter['title']}' 的结果。")
         yield full_report, gr.File(visible=False)
-        
         time.sleep(1)
+
+    # --- 任务结束 ---
     full_report += "小说校对完毕\n\n"
     print("[INFO] 所有章节校对完成。")
-
-    # --- 带时间戳的文件名 ---
     timestamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
     output_filename = f"report_{timestamp}.txt"
-    
-    print(f"[DEBUG] 正在将最终报告写入文件: {output_filename}")
-    try:
-        with open(output_filename, "w", encoding="utf-8") as f:
-            f.write(full_report)
-        print("[INFO] 报告文件写入成功。")
-        yield full_report, gr.File(value=output_filename, visible=True, label=f"下载报告 ({output_filename})")
-    except Exception as e:
-        print(f"[ERROR] 写入报告文件时出错: {e}")
-        yield full_report + f"\n\n错误：无法创建下载文件: {e}", gr.File(visible=False)
-    
-    print("--- 校对任务结束 ---\n")
+    with open(output_filename, "w", encoding="utf-8") as f: f.write(full_report)
+    yield full_report, gr.File(value=output_filename, visible=True, label=f"下载报告 ({output_filename})")
 
+# --- 4. Gradio 界面 (动态模型选择) ---
+try:
+    models_data = load_models()
+    initial_google_models = models_data.get('google', [])
+    initial_openai_models = models_data.get('openai', [])
+except Exception as e:
+    print(f"[FATAL] 无法加载 models.yaml, 将使用默认值。错误: {e}")
+    initial_google_models, initial_openai_models = ["gemini-1.5-flash-latest"], ["gpt-4o"]
 
-# --- 4. Gradio 界面 (重大更新) ---
+def update_model_choices(provider):
+    """根据选择的 API 提供商更新模型列表"""
+    if provider == "Google Gemini":
+        choices = initial_google_models
+    elif provider == "OpenAI":
+        choices = initial_openai_models
+    else:
+        choices = []
+    return gr.Radio(choices=choices, value=choices[0] if choices else None)
+
 with gr.Blocks(theme=gr.themes.Soft()) as app:
-    gr.Markdown("# 📖 小说文本智能校对器 (Gemini)")
-    gr.Markdown("将你的小说文本粘贴到下方，工具会自动按 **每行开头的“第X章”** 进行分割，并调用 Gemini API 逐章进行校对。")
+    gr.Markdown("# 📖 小说文本智能校对器 (多 API 支持)")
+    gr.Markdown("将你的小说文本粘贴到下方，选择 API 和模型，工具会自动进行分割和校对。")
     
     with gr.Row():
         with gr.Column(scale=2):
-            input_text = gr.Textbox(
-                lines=20,
-                label="小说原文",
-                placeholder="请在这里粘贴你的小说全文..."
-            )
+            input_text = gr.Textbox(lines=15, label="小说原文", placeholder="请在这里粘贴你的小说全文...")
             
             gr.Markdown("### 校对选项")
+            api_provider_selector = gr.Radio(
+                choices=["Google Gemini", "OpenAI"],
+                label="选择 API 提供商", value="Google Gemini"
+            )
+            model_selector = gr.Radio(
+                label="选择校对模型",
+                choices=initial_google_models,
+                value=initial_google_models[0] if initial_google_models else None
+            )
             prompt_selector = gr.Radio(
                 choices=[("综合审查 (语句+错字)", "detailed_review"), ("仅查错别字", "simple_typo")],
-                label="选择校对模式",
-                value="detailed_review"
+                label="选择校对模式", value="detailed_review"
             )
-
-            model_selector = gr.Radio(
-                # <--- 更新模型名称 ---
-                ["gemini-2.5-flash", "gemini-2.5-pro"],
-                label="选择校对模型",
-                value="gemini-2.5-flash"
-            )
-
             submit_btn = gr.Button("🚀 开始校对", variant="primary")
 
         with gr.Column(scale=3):
-            output_text = gr.Textbox(
-                lines=28, # 增加行数以更好地显示内容
-                label="校对报告 (实时更新)",
-                placeholder="校对建议将在这里逐章显示...",
-                interactive=False
-            )
-            download_file = gr.File(
-                interactive=False,
-                visible=False # 初始状态下隐藏
-            )
+            output_text = gr.Textbox(lines=28, label="校对报告 (实时更新)", placeholder="校对建议将在这里逐章显示...", interactive=False)
+            download_file = gr.File(interactive=False, visible=False)
 
+    # --- 事件监听 ---
+    api_provider_selector.change(
+        fn=update_model_choices,
+        inputs=api_provider_selector,
+        outputs=model_selector
+    )
     submit_btn.click(
         fn=process_and_proofread_novel,
-        inputs=[input_text, model_selector, prompt_selector], # <--- 增加了 prompt_selector
+        inputs=[input_text, api_provider_selector, model_selector, prompt_selector],
         outputs=[output_text, download_file]
     )
 
     gr.Markdown("---")
     gr.Markdown("开发 by Gemini & AI。")
 
-
 # --- 5. 启动应用 ---
 if __name__ == "__main__":
-    if not os.path.exists("prompts"):
-        print("错误：找不到 'prompts' 文件夹。请创建该文件夹并添加提示词 .txt 文件。")
-    elif not os.path.exists("config.yaml"):
-        print("错误：找不到 config.yaml 文件。请先创建并配置该文件。")
-    else:
+    # 简单的启动前检查
+    required_files = ["config.yaml", "config_gpt.yaml", "models.yaml", "prompts/detailed_review.txt", "prompts/simple_typo.txt"]
+    if all(os.path.exists(f) for f in required_files):
         print("启动 Gradio 应用... 请在浏览器中打开提供的 URL。")
-        print("在下方终端窗口查看 [DEBUG] 和 [ERROR] 信息。")
         app.launch()
+    else:
+        print("[FATAL] 缺少必要的配置文件。请确保以下文件/文件夹存在:")
+        for f in required_files: print(f" - {f}")
